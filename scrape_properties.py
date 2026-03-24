@@ -3,370 +3,348 @@
 import json
 import re
 from pathlib import Path
-from typing import List, Dict
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
+from playwright.sync_api import sync_playwright
 
-import requests
 from bs4 import BeautifulSoup
+
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/122.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.google.com/",
+    "Connection": "keep-alive",
 }
 
-SUBPAGES = {
-    "home": "",
-    "amenities": "/amenities",
-    "suites": "/suites",
-    "location": "/location",
+TIMEOUT = 30
+
+# Edit this when needed.
+PAGE_RULES = {
+    "main": {
+        "suffixes": [""],
+        "keywords": [],
+    },
+    "floorplans": {
+        "suffixes": ["/brochure"],
+        "keywords": [
+            "floor plans",
+            "floorplans",
+            "brochure",
+            "suites",
+            "available units",
+        ],
+    },
+    "amenities": {
+        "suffixes": ["/amenities"],
+        "keywords": [
+            "amenities",
+            "community amenities",
+            "apartment amenities",
+            "building amenities",
+        ],
+    },
 }
 
-PROVINCE_MAP = {
-    "ON": "Ontario",
-    "Ontario": "Ontario",
-    "AB": "Alberta",
-    "Alberta": "Alberta",
-    "BC": "British Columbia",
-    "British Columbia": "British Columbia",
-    "MB": "Manitoba",
-    "Manitoba": "Manitoba",
-    "NB": "New Brunswick",
-    "New Brunswick": "New Brunswick",
-    "NL": "Newfoundland and Labrador",
-    "Newfoundland and Labrador": "Newfoundland and Labrador",
-    "NS": "Nova Scotia",
-    "Nova Scotia": "Nova Scotia",
-    "PE": "Prince Edward Island",
-    "Prince Edward Island": "Prince Edward Island",
-    "QC": "Quebec",
-    "Quebec": "Quebec",
-    "SK": "Saskatchewan",
-    "Saskatchewan": "Saskatchewan",
-}
-
-SUITE_TYPE_PATTERNS = [
-    (r"\bbachelor\b", "Bachelor"),
-    (r"\bstudio\b", "Studio"),
-    (r"\bone bedroom plus den\b|\b1[\s-]?bedroom plus den\b", "One Bedroom Plus Den"),
-    (r"\bone bedroom\b|\b1[\s-]?bedroom\b", "One Bedroom"),
-    (r"\btwo bedroom\b|\b2[\s-]?bedroom\b", "Two Bedroom"),
-    (r"\bthree bedroom\b|\b3[\s-]?bedroom\b", "Three Bedroom"),
-    (r"\bfour bedroom\b|\b4[\s-]?bedroom\b", "Four Bedroom"),
+IGNORE_LINK_KEYWORDS = [
+    "privacy",
+    "cookie",
+    "login",
+    "sign in",
+    "resident portal",
+    "applicant",
+    "careers",
+    "corporate",
+    "contact us",
+    "facebook",
+    "instagram",
+    "linkedin",
+    "youtube",
+    "x.com",
+    "twitter",
+    "mailto:",
+    "tel:",
 ]
 
-PARKING_PATTERNS = [
-    (r"\bindoor and outdoor parking\b", "Indoor and Outdoor Parking"),
-    (r"\bindoor/outdoor parking\b", "Indoor and Outdoor Parking"),
-    (r"\bindoor parking\b", "Indoor Parking"),
-    (r"\boutdoor parking\b", "Outdoor Parking"),
-    (r"\bunderground parking\b", "Underground Parking"),
-    (r"\bunderground garage\b", "Underground Parking"),
-    (r"\bcovered parking\b", "Covered Parking"),
-    (r"\bvisitor parking\b", "Visitor Parking"),
-    (r"\btenant parking\b", "Tenant Parking"),
-    (r"\bguest parking\b", "Guest Parking"),
-    (r"\btenant and visitor parking\b", "Tenant and Visitor Parking"),
-    (r"\bparking available\b", "Parking Available"),
-    (r"\bsurface parking\b", "Surface Parking"),
-    (r"\bgarage parking\b", "Garage Parking"),
-    (r"\bon-site parking\b", "On-Site Parking"),
-]
-
-UTILITY_PATTERNS = [
-    (r"\bheat\b", "Heat"),
-    (r"\bhydro\b", "Hydro"),
-    (r"\bwater\b", "Water"),
-    (r"\bhot water\b", "Hot Water"),
-    (r"\belectricity\b", "Electricity"),
-]
+OUTPUT_FILE = "raw_collected_properties.json"
+INPUT_FILE = "urls.txt"
 
 
-def clean_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+def clean(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text)).strip()
 
 
-def unique_keep_order(items: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for item in items:
-        item = clean_text(str(item))
-        if item and item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
-
-
-def read_urls(file_path: str) -> List[str]:
-    lines = Path(file_path).read_text(encoding="utf-8").splitlines()
-    return [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
 
 
 def fetch_html(url: str) -> str:
-    response = requests.get(url, headers=HEADERS, timeout=30)
-    response.raise_for_status()
-    return response.text
-
-
-def build_subpage_urls(base_url: str) -> Dict[str, str]:
-    base = base_url.strip().rstrip("/")
-    return {name: base + suffix for name, suffix in SUBPAGES.items()}
-
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent=HEADERS["User-Agent"],
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.google.com/",
+            }
+        )
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
+        html = page.content()
+        print(f"Fetched with browser: {url}")
+        browser.close()
+        return html
 
 def soup_from_html(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "lxml")
 
 
-def extract_visible_text(soup: BeautifulSoup) -> str:
-    lines = [clean_text(x) for x in soup.stripped_strings if clean_text(x)]
-    return "\n".join(lines)
-
-
 def extract_title(soup: BeautifulSoup) -> str:
-    h1 = soup.find("h1")
-    if h1:
-        title = clean_text(h1.get_text(" ", strip=True))
-        if title:
-            return title
-
     if soup.title:
-        title = clean_text(soup.title.get_text(" ", strip=True))
-        title = re.sub(r"^Home\s*\|\s*", "", title, flags=re.I)
-        return title
-
+        return clean(soup.title.get_text(" ", strip=True))
     return ""
 
 
 def extract_meta_description(soup: BeautifulSoup) -> str:
     tag = soup.find("meta", attrs={"name": "description"})
     if tag and tag.get("content"):
-        return clean_text(tag["content"])
+        return clean(tag["content"])
     return ""
 
 
-def extract_phone(text: str, soup: BeautifulSoup) -> str:
-    tel_link = soup.select_one('a[href^="tel:"]')
-    if tel_link:
-        href = tel_link.get("href", "")
-        phone = href.replace("tel:", "").strip()
-        if phone:
-            return phone
-
-    match = re.search(r"(?:\+?1[\s\-]?)?\(?\d{3}\)?[\s\-]\d{3}[\s\-]\d{4}", text)
-    return match.group(0) if match else ""
-
-
-def detect_manager_name(combined_text: str, base_url: str) -> str:
-    low_text = combined_text.lower()
-    low_url = base_url.lower()
-
-    if "sterling karamar" in low_text or "sterling-karamar" in low_text or "karamar" in low_url:
-        return "Sterling Karamar"
-    if "hazelview" in low_text or "hazelview" in low_url:
-        return "Hazelview Properties"
-
-    return ""
+def extract_visible_text(soup: BeautifulSoup) -> str:
+    parts = []
+    for tag in soup.find_all(string=True):
+        parent = tag.parent.name if tag.parent else ""
+        if parent in {"script", "style", "noscript"}:
+            continue
+        text = clean(tag)
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
 
 
-def extract_address_city_province(combined_text: str) -> Dict[str, str]:
-    text = combined_text
+def extract_json_ld(soup: BeautifulSoup) -> List[dict]:
+    items = []
+    for tag in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = tag.string or tag.get_text(strip=True)
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                items.extend([x for x in data if isinstance(x, dict)])
+            elif isinstance(data, dict):
+                items.append(data)
+        except Exception:
+            continue
+    return items
 
-    pattern = re.compile(
-        r"([0-9][^\n,]*?(?:Street|St\.|Road|Rd\.|Drive|Dr\.|Avenue|Ave\.|Boulevard|Blvd\.|Lane|Ln\.|Court|Ct\.|Crescent|Circle|Terrace|Place|Way)[^\n,]*)"
-        r",?\s+([A-Za-z .'-]+),\s*(ON|AB|BC|MB|NB|NL|NS|PE|QC|SK)\b",
-        flags=re.I,
-    )
 
-    match = pattern.search(text)
-    if match:
-        address = clean_text(match.group(1))
-        city = clean_text(match.group(2))
-        province = PROVINCE_MAP.get(match.group(3).upper(), match.group(3).upper())
-        return {
-            "address": f"{address}, {city}",
-            "city_name": city,
-            "province": province,
-        }
-
+def extract_headings(soup: BeautifulSoup) -> Dict[str, List[str]]:
     return {
-        "address": "",
-        "city_name": "",
-        "province": "",
+        "h1": [clean(x.get_text(" ", strip=True)) for x in soup.find_all("h1") if clean(x.get_text(" ", strip=True))],
+        "h2": [clean(x.get_text(" ", strip=True)) for x in soup.find_all("h2") if clean(x.get_text(" ", strip=True))],
+        "h3": [clean(x.get_text(" ", strip=True)) for x in soup.find_all("h3") if clean(x.get_text(" ", strip=True))],
     }
 
 
-def normalize_suite_type_text(text: str) -> str:
-    text = text.lower()
-
-    replacements = [
-        (r"\bone and two-bedroom\b", "one bedroom two bedroom"),
-        (r"\bone and two bedroom\b", "one bedroom two bedroom"),
-        (r"\btwo and three-bedroom\b", "two bedroom three bedroom"),
-        (r"\btwo and three bedroom\b", "two bedroom three bedroom"),
-        (r"\bthree and four-bedroom\b", "three bedroom four bedroom"),
-        (r"\bthree and four bedroom\b", "three bedroom four bedroom"),
-        (r"\b1 and 2-bedroom\b", "1 bedroom 2 bedroom"),
-        (r"\b1 and 2 bedroom\b", "1 bedroom 2 bedroom"),
-        (r"\b2 and 3-bedroom\b", "2 bedroom 3 bedroom"),
-        (r"\b2 and 3 bedroom\b", "2 bedroom 3 bedroom"),
-        (r"\b3 and 4-bedroom\b", "3 bedroom 4 bedroom"),
-        (r"\b3 and 4 bedroom\b", "3 bedroom 4 bedroom"),
-        (r"\b1, 2,? ?& 3-bedroom\b", "1 bedroom 2 bedroom 3 bedroom"),
-        (r"\b1, 2,? and 3-bedroom\b", "1 bedroom 2 bedroom 3 bedroom"),
-        (r"\b1, 2,? ?& 3 bedroom\b", "1 bedroom 2 bedroom 3 bedroom"),
-        (r"\b1, 2,? and 3 bedroom\b", "1 bedroom 2 bedroom 3 bedroom"),
-        (r"\b1, 2, 3-bedroom\b", "1 bedroom 2 bedroom 3 bedroom"),
-        (r"\b1, 2, 3 bedroom\b", "1 bedroom 2 bedroom 3 bedroom"),
-        (r"\bstudio, 1, 2,? ?& 3-bedroom\b", "studio 1 bedroom 2 bedroom 3 bedroom"),
-        (r"\bstudio, 1, 2,? and 3-bedroom\b", "studio 1 bedroom 2 bedroom 3 bedroom"),
-        (r"\bstudio, 1, 2,? ?& 3 bedroom\b", "studio 1 bedroom 2 bedroom 3 bedroom"),
-        (r"\bstudio, 1, 2,? and 3 bedroom\b", "studio 1 bedroom 2 bedroom 3 bedroom"),
-        (r"\bbachelor, 1 and 2-bedroom\b", "bachelor 1 bedroom 2 bedroom"),
-        (r"\bbachelor, 1 and 2 bedroom\b", "bachelor 1 bedroom 2 bedroom"),
-        (r"\bbachelor, one and two-bedroom\b", "bachelor one bedroom two bedroom"),
-        (r"\bbachelor, one and two bedroom\b", "bachelor one bedroom two bedroom"),
-    ]
-
-    for pattern, replacement in replacements:
-        text = re.sub(pattern, replacement, text, flags=re.I)
-
-    return text
+def same_domain(url1: str, url2: str) -> bool:
+    return urlparse(url1).netloc.lower() == urlparse(url2).netloc.lower()
 
 
-def extract_suite_types(text: str) -> List[str]:
-    text = normalize_suite_type_text(text)
-    found = []
-
-    for pattern, label in SUITE_TYPE_PATTERNS:
-        if re.search(pattern, text, flags=re.I):
-            found.append(label)
-
-    return unique_keep_order(found)
+def normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    cleaned = parsed._replace(fragment="")
+    url = cleaned.geturl()
+    return url.rstrip("/")
 
 
-def extract_parking(text: str) -> List[str]:
-    found = []
-    for pattern, label in PARKING_PATTERNS:
-        if re.search(pattern, text, flags=re.I):
-            found.append(label)
-    return unique_keep_order(found)
+def should_ignore_link(href: str, text: str) -> bool:
+    blob = f"{href} {text}".lower()
+    return any(keyword in blob for keyword in IGNORE_LINK_KEYWORDS)
 
 
-def extract_utilities(text: str) -> List[str]:
-    found = []
-    lower = text.lower()
+def extract_links(soup: BeautifulSoup, base_url: str) -> List[Dict[str, str]]:
+    links = []
+    seen = set()
 
-    explicit_context = (
-        "utilities included" in lower
-        or ("included" in lower and "heat" in lower)
-        or ("included" in lower and "water" in lower)
-        or ("included" in lower and "hydro" in lower)
-    )
+    for a in soup.find_all("a", href=True):
+        href = clean(a.get("href", ""))
+        text = clean(a.get_text(" ", strip=True))
 
-    if explicit_context:
-        for pattern, label in UTILITY_PATTERNS:
-            if re.search(pattern, lower, flags=re.I):
-                found.append(label)
+        if not href:
+            continue
+        if href.startswith("#"):
+            continue
 
-    return unique_keep_order(found)
+        full_url = urljoin(base_url, href)
+        full_url = normalize_url(full_url)
+
+        if not same_domain(base_url, full_url):
+            continue
+        if should_ignore_link(full_url, text):
+            continue
+
+        key = (full_url, text.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        links.append({
+            "text": text,
+            "href": full_url,
+        })
+
+    return links
 
 
-def light_extract_fields(base_url: str, pages: Dict[str, Dict]) -> Dict:
-    home = pages.get("home", {})
-    home_soup = soup_from_html(home.get("html", "")) if home.get("html") else BeautifulSoup("", "lxml")
-
-    combined_text = "\n".join(
-        page.get("text", "") for page in pages.values() if page.get("text")
-    )
-
-    title = extract_title(home_soup)
-    meta_description = extract_meta_description(home_soup)
-    phone = extract_phone(combined_text, home_soup)
-    manager = detect_manager_name(combined_text, base_url)
-    addr = extract_address_city_province(combined_text)
-    suite_types = extract_suite_types(combined_text)
-    parking = extract_parking(combined_text)
-    utilities = extract_utilities(combined_text)
+def fetch_page_data(url: str) -> Dict:
+    html = fetch_html(url)
+    soup = soup_from_html(html)
 
     return {
-        "post_title": title,
-        "post_content": meta_description,
-        "property_type": "Apartment",
-        "property_manager_name": manager,
-        "property_manager_phone": phone,
-        "property_manager_website": base_url,
-        "address": addr["address"],
-        "province": addr["province"],
-        "city_name": addr["city_name"],
-        "suite_types": suite_types,
-        "suite_features": [],
-        "amenities": [],
-        "utilities_included": utilities,
-        "parking": parking,
+        "url": normalize_url(url),
+        "title": extract_title(soup),
+        "meta_description": extract_meta_description(soup),
+        "html": html,
+        "text": extract_visible_text(soup),
+        "json_ld": extract_json_ld(soup),
+        "headings": extract_headings(soup),
+        "links": extract_links(soup, url),
     }
 
 
-def scrape_property(base_url: str) -> Dict:
-    page_urls = build_subpage_urls(base_url)
+def try_suffixes(base_url: str, suffixes: List[str]) -> Optional[Dict]:
+    last_error = None
+
+    for suffix in suffixes:
+        candidate = normalize_url(base_url.rstrip("/") + suffix)
+        print(f"Trying: {candidate}")
+        try:
+            return fetch_page_data(candidate)
+        except Exception as e:
+            print(f"Failed: {candidate} -> {repr(e)}")
+            last_error = e
+
+    if last_error:
+        raise RuntimeError(f"All suffix attempts failed for {base_url}: {repr(last_error)}")
+
+    return None
+
+
+def score_link_candidate(link: Dict[str, str], keywords: List[str]) -> int:
+    blob = f"{link.get('text', '')} {link.get('href', '')}".lower()
+    score = 0
+    for keyword in keywords:
+        if keyword.lower() in blob:
+            score += 1
+    return score
+
+
+def find_best_link_page(main_page: Dict, role_name: str, keywords: List[str]) -> Optional[Dict]:
+    candidates = []
+    for link in main_page.get("links", []):
+        score = score_link_candidate(link, keywords)
+        if score > 0:
+            candidates.append((score, link["href"]))
+
+    candidates.sort(reverse=True)
+
+    tried = set()
+    for _, url in candidates:
+        if url in tried:
+            continue
+        tried.add(url)
+        try:
+            return fetch_page_data(url)
+        except Exception:
+            continue
+
+    return None
+
+
+def discover_pages_for_property(base_url: str) -> Dict[str, Dict]:
     pages = {}
 
-    for page_name, page_url in page_urls.items():
-        try:
-            print(f"  -> fetching {page_url}")
-            html = fetch_html(page_url)
-            soup = soup_from_html(html)
-            text = extract_visible_text(soup)
+    # Main page
+    main_page = try_suffixes(base_url, PAGE_RULES["main"]["suffixes"])
+    if not main_page:
+        raise RuntimeError(f"Could not fetch main page for {base_url}")
+    pages["main"] = main_page
 
-            pages[page_name] = {
-                "url": page_url,
-                "html": html,
-                "text": text,
-                "title": extract_title(soup),
-                "meta_description": extract_meta_description(soup),
-            }
-        except Exception as e:
-            print(f"     failed {page_url}: {e}")
-            pages[page_name] = {
-                "url": page_url,
-                "html": "",
-                "text": "",
+    # Other roles
+    for role_name, rule in PAGE_RULES.items():
+        if role_name == "main":
+            continue
+
+        page = try_suffixes(base_url, rule["suffixes"])
+        if not page:
+            page = find_best_link_page(main_page, role_name, rule["keywords"])
+
+        if page:
+            pages[role_name] = page
+        else:
+            pages[role_name] = {
+                "url": "",
                 "title": "",
                 "meta_description": "",
-                "error": str(e),
+                "html": "",
+                "text": "",
+                "json_ld": [],
+                "headings": {"h1": [], "h2": [], "h3": []},
+                "links": [],
+                "error": f"Could not find page for role: {role_name}",
             }
 
-    extracted = light_extract_fields(base_url, pages)
+    return pages
+
+
+def collect_property(base_url: str) -> Dict:
+    base_url = normalize_url(base_url)
+    pages = discover_pages_for_property(base_url)
 
     return {
-        "url": base_url,
+        "base_url": base_url,
+        "page_rules_used": PAGE_RULES,
         "pages": pages,
-        "scraped_fields": extracted,
     }
+
+
+def read_urls(file_path: str) -> List[str]:
+    lines = Path(file_path).read_text(encoding="utf-8").splitlines()
+    return [clean(line) for line in lines if clean(line) and not clean(line).startswith("#")]
 
 
 def main():
-    base_urls = read_urls("urls.txt")
+    urls = read_urls(INPUT_FILE)
     results = []
 
-    for base_url in base_urls:
+    for url in urls:
         try:
-            print(f"Scraping property: {base_url}")
-            results.append(scrape_property(base_url))
+            print(f"Collecting: {url}")
+            result = collect_property(url)
+            results.append(result)
         except Exception as e:
-            print(f"FAILED: {base_url} -> {e}")
+            print(f"FAILED: {url} -> {e}")
             results.append({
-                "url": base_url,
+                "base_url": url,
+                "page_rules_used": PAGE_RULES,
                 "pages": {},
-                "scraped_fields": {},
                 "error": str(e),
             })
 
-    Path("properties_raw.json").write_text(
+    Path(OUTPUT_FILE).write_text(
         json.dumps(results, indent=2, ensure_ascii=False),
-        encoding="utf-8"
+        encoding="utf-8",
     )
-    print("Saved -> properties_raw.json")
+    print(f"Saved -> {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
