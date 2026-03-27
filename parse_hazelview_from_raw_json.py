@@ -254,12 +254,13 @@ def parse_data_locations(main_page: Dict) -> List[dict]:
         raw = tag.get("data-locations", "")
         if not raw:
             continue
-        try:
-            data = json.loads(html.unescape(raw))
-            if isinstance(data, list):
-                return [item for item in data if isinstance(item, dict)]
-        except Exception:
-            continue
+        for candidate in (raw, html.unescape(raw)):
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, list):
+                    return [item for item in data if isinstance(item, dict)]
+            except Exception:
+                continue
     return []
 
 
