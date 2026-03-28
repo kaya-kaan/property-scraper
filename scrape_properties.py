@@ -27,8 +27,7 @@ HEADERS = {
 
 TIMEOUT = 30
 
-# Edit this when needed.
-PAGE_RULES = {
+REALSTAR_PAGE_RULES = {
     "main": {
         "suffixes": [""],
         "keywords": [],
@@ -51,6 +50,20 @@ PAGE_RULES = {
             "apartment amenities",
             "building amenities",
         ],
+    },
+}
+
+HAZELVIEW_PAGE_RULES = {
+    "main": {
+        "suffixes": [""],
+        "keywords": [],
+    },
+}
+
+DEFAULT_PAGE_RULES = {
+    "main": {
+        "suffixes": [""],
+        "keywords": [],
     },
 }
 
@@ -80,6 +93,25 @@ INPUT_FILE = "urls.txt"
 
 def clean(text: str) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def detect_provider(url: str) -> str:
+    netloc = urlparse(url).netloc.lower()
+
+    if netloc.endswith("realstar.ca"):
+        return "realstar"
+    if netloc.endswith("hazelviewproperties.com"):
+        return "hazelview"
+
+    return "generic"
+
+
+def page_rules_for_provider(provider: str) -> Dict[str, Dict[str, List[str]]]:
+    if provider == "realstar":
+        return REALSTAR_PAGE_RULES
+    if provider == "hazelview":
+        return HAZELVIEW_PAGE_RULES
+    return DEFAULT_PAGE_RULES
 
 
 
@@ -270,22 +302,28 @@ def find_best_link_page(main_page: Dict, role_name: str, keywords: List[str]) ->
     return None
 
 
-def discover_pages_for_property(base_url: str) -> Dict[str, Dict]:
+def discover_pages_for_property(base_url: str, provider: str) -> Dict[str, Dict]:
+    page_rules = page_rules_for_provider(provider)
     pages = {}
 
     # Main page
-    main_page = try_suffixes(base_url, PAGE_RULES["main"]["suffixes"])
+    main_page = try_suffixes(base_url, page_rules["main"]["suffixes"])
     if not main_page:
         raise RuntimeError(f"Could not fetch main page for {base_url}")
     pages["main"] = main_page
 
     # Other roles
-    for role_name, rule in PAGE_RULES.items():
+    for role_name, rule in page_rules.items():
         if role_name == "main":
             continue
 
-        page = try_suffixes(base_url, rule["suffixes"])
-        if not page:
+        page = None
+        try:
+            page = try_suffixes(base_url, rule["suffixes"])
+        except Exception as e:
+            print(f"Suffix discovery failed for {role_name}: {repr(e)}")
+
+        if not page and rule["keywords"]:
             page = find_best_link_page(main_page, role_name, rule["keywords"])
 
         if page:
@@ -308,11 +346,13 @@ def discover_pages_for_property(base_url: str) -> Dict[str, Dict]:
 
 def collect_property(base_url: str) -> Dict:
     base_url = normalize_url(base_url)
-    pages = discover_pages_for_property(base_url)
+    provider = detect_provider(base_url)
+    pages = discover_pages_for_property(base_url, provider)
 
     return {
         "base_url": base_url,
-        "page_rules_used": PAGE_RULES,
+        "provider": provider,
+        "page_rules_used": page_rules_for_provider(provider),
         "pages": pages,
     }
 
@@ -332,10 +372,12 @@ def main():
             result = collect_property(url)
             results.append(result)
         except Exception as e:
+            provider = detect_provider(url)
             print(f"FAILED: {url} -> {e}")
             results.append({
                 "base_url": url,
-                "page_rules_used": PAGE_RULES,
+                "provider": provider,
+                "page_rules_used": page_rules_for_provider(provider),
                 "pages": {},
                 "error": str(e),
             })
